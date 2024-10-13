@@ -1,3 +1,5 @@
+[![GoReportCard](https://goreportcard.com/badge/github.com/R-omk/chanretype)](https://goreportcard.com/report/github.com/R-omk/chanretype)
+
 ## Overview
 
 This package enables you to create a transformation channel that reads from an input channel, applies a transformation function to each element, and writes the results to an output channel. The processing is concurrent, allowing multiple goroutines to handle the transformation simultaneously. The order of events is preserved regardless of the completion order of transformations.
