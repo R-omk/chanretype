@@ -93,13 +93,13 @@ func NewTransformChannel[I any, O any](
 		defer close(outputChan)
 		defer close(resultErrorChan)
 
-		stopedCh := make(chan struct{})
-		defer close(stopedCh)
+		stopPipeCh := make(chan struct{})
 
-		stopPipeProcessingCh := make(chan struct{}, 1)
-		defer close(stopPipeProcessingCh)
+		stopPipe, pipeIsStopped := createSafeCloser(stopPipeCh)
 
-		var pipeIsTerminatedFlag atomic.Bool
+		defer func() {
+			stopPipe()
+		}()
 
 		terminateWithError := func(err error) {
 			mu.Lock()
@@ -107,16 +107,17 @@ func NewTransformChannel[I any, O any](
 
 				// store only first error and stop pipe only once
 				resultError = err
-				pipeIsTerminatedFlag.Store(true)
-				stopPipeProcessingCh <- struct{}{}
+				stopPipe()
 			}
 			mu.Unlock()
 		}
 
 		// run context done processing
+		stopedDoneProcessingCh := make(chan struct{})
+		defer close(stopedDoneProcessingCh)
 		go func() {
 			select {
-			case <-stopedCh:
+			case <-stopedDoneProcessingCh:
 				return
 			case <-ctx.Done():
 				terminateWithError(ctx.Err())
@@ -135,12 +136,12 @@ func NewTransformChannel[I any, O any](
 			for {
 
 				select {
-				case <-stopPipeProcessingCh:
+				case <-stopPipeCh:
 					return
 
 				case sem <- struct{}{}:
 					select {
-					case <-stopPipeProcessingCh:
+					case <-stopPipeCh:
 						return
 					case event, ok := <-inputChan:
 
@@ -154,19 +155,19 @@ func NewTransformChannel[I any, O any](
 				eventLockCh := make(chan struct{})
 
 				pipeWg.Add(1)
-				go func(prevLockCh chan struct{}, lockCh chan struct{}, input I) {
+				go func(prevLockCh <-chan struct{}, lockCh chan<- struct{}, input I) {
 
 					transformed, err := transform(ctx, input)
 
 					select {
-					case <-stopPipeProcessingCh:
+					case <-stopPipeCh:
 						time.Sleep(0) // dummy func for coverage detect
 					// safe to unlock and free goroutine because pipe is stopped
 					case <-prevLockCh: // waiting for the previous event to be written to output channel
 
 					}
 
-					if !pipeIsTerminatedFlag.Load() {
+					if !pipeIsStopped() {
 						if err != nil {
 							terminateWithError(err)
 						} else {
@@ -195,4 +196,22 @@ func NewTransformChannel[I any, O any](
 	}()
 
 	return outputChan, resultErrorChan
+}
+
+// createSafeCloser returns a function to safely close the channel
+// and another function to check if the channel is closed.
+func createSafeCloser[T any](ch chan T) (closeFunc func(), isClosedFunc func() bool) {
+	var closed uint32
+
+	closeFunc = func() {
+		if atomic.CompareAndSwapUint32(&closed, 0, 1) {
+			close(ch)
+		}
+	}
+
+	isClosedFunc = func() bool {
+		return atomic.LoadUint32(&closed) == 1
+	}
+
+	return closeFunc, isClosedFunc
 }
